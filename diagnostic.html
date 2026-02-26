@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>KX-180 Bridge Diagnostic</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            background: #121212;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .log {
+            background: #000;
+            padding: 10px;
+            height: 400px;
+            overflow-y: scroll;
+            border: 1px solid #333;
+            font-family: monospace;
+        }
+
+        .controls {
+            margin-top: 20px;
+        }
+
+        input {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 5px;
+            width: 300px;
+        }
+
+        button {
+            padding: 5px 15px;
+            cursor: pointer;
+        }
+
+        .status {
+            margin-bottom: 10px;
+        }
+
+        .highlight {
+            color: #00ff00;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>KX-180 Bridge Diagnostic</h1>
+    <div class="status" id="status">Connecting...</div>
+
+    <div class="log" id="log"></div>
+
+    <div class="controls">
+        <h3>Manual Command</h3>
+        <input type="text" id="hexInput" placeholder="Enter Hex (e.g. 05 FE 05 23 23 49)">
+        <button onclick="sendHex()">Send Hex (ID 1)</button>
+    </div>
+
+    <div class="controls">
+        <h3>Active Reports</h3>
+        <div id="reportContainer"
+            style="font-family: monospace; font-size: 13px; max-height: 200px; overflow-y: auto; background: #000; padding:10px;">
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr style="border-bottom: 2px solid #555;">
+                        <th style="text-align: left; padding: 5px;">Type</th>
+                        <th style="text-align: left; padding: 5px;">Data</th>
+                    </tr>
+                </thead>
+                <tbody id="reportTable"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="controls">
+        <h3>Live Matrix (Filtered: No Heartbeats)</h3>
+        <div id="matrix"
+            style="display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px; font-family: monospace; max-width: 600px;">
+        </div>
+    </div>
+
+    <div class="controls">
+        <h3>Dynamic Byte Log</h3>
+        <div id="volumeLog"
+            style="font-family: monospace; font-size: 12px; background: #000; padding: 10px; border: 1px solid #333; height: 100px; overflow-y: scroll;">
+            Waiting for non-static changes...
+        </div>
+    </div>
+
+    <div class="controls">
+        <button onclick="testCmd('01 01')">Poll ID</button>
+        <button onclick="testCmd('01 05 01')">Poll Vol</button>
+        <button onclick="testCmd('01 05 FE 05 00 00 00')">Poll State</button>
+    </div>
+
+    <script>
+        const table = document.getElementById('reportTable');
+        const matrix = document.getElementById('matrix');
+        const status = document.getElementById('status');
+        const log = document.getElementById('log');
+        const volLog = document.getElementById('volumeLog');
+
+        let reportMap = new Map();
+        let currentBytes = new Array(64).fill('00');
+        let matrixTimeouts = new Array(64).fill(null);
+
+        // Init Matrix
+        for (let i = 0; i < 64; i++) {
+            const div = document.createElement('div');
+            div.id = `mbyte-${i}`;
+            div.style.padding = '5px';
+            div.style.border = '1px solid #444';
+            div.style.textAlign = 'center';
+            div.innerText = '00';
+            matrix.appendChild(div);
+        }
+
+        const socket = new WebSocket('ws://localhost:8080');
+
+        socket.onopen = () => { status.innerHTML = 'Status: <span class="highlight">Connected</span>'; };
+
+        socket.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'status') {
+                const hex = msg.data;
+                const bytes = hex.match(/.{1,2}/g);
+                const id = bytes[0];
+                const len = bytes[1];
+                const key = `${id} ${len}`;
+
+                // Update Table (Global View)
+                if (!reportMap.has(key)) {
+                    const tr = document.createElement('tr');
+                    tr.id = `row-${key.replace(' ', '-')}`;
+                    tr.innerHTML = `<td style="padding:5px; border-bottom:1px solid #333; font-weight:bold;">${key}</td>
+                                    <td id="data-${key.replace(' ', '-')}" style="padding:5px; border-bottom:1px solid #333; word-break: break-all;">${hex}</td>`;
+                    table.appendChild(tr);
+                }
+
+                const dataCell = document.getElementById(`data-${key.replace(' ', '-')}`);
+                if (reportMap.get(key) !== hex) {
+                    dataCell.innerHTML = formatDiff(reportMap.get(key) || '', hex);
+                    reportMap.set(key, hex);
+                }
+
+                // Update Matrix (Ignore Heartbeats 02 01 FF)
+                if (hex.startsWith('0201FF')) return;
+
+                let changes = [];
+                bytes.forEach((b, i) => {
+                    if (i < 64 && currentBytes[i] !== b) {
+                        changes.push(`B${i}:${b}`);
+                        const mcell = document.getElementById(`mbyte-${i}`);
+                        mcell.innerText = b;
+                        mcell.style.color = 'red';
+                        mcell.style.backgroundColor = '#440000';
+
+                        if (matrixTimeouts[i]) clearTimeout(matrixTimeouts[i]);
+                        matrixTimeouts[i] = setTimeout(() => {
+                            mcell.style.color = '#fff';
+                            mcell.style.backgroundColor = 'transparent';
+                        }, 2000);
+                        currentBytes[i] = b;
+                    }
+                });
+
+                if (changes.length > 0) {
+                    const line = document.createElement('div');
+                    line.innerText = `[${new Date().toLocaleTimeString()}] ${changes.join(' ')}`;
+                    volLog.prepend(line);
+                }
+            }
+        };
+
+        function formatDiff(oldHex, newHex) {
+            if (!oldHex) return newHex.match(/.{1,2}/g).join(' ');
+            const oldB = oldHex.match(/.{1,2}/g);
+            const newB = newHex.match(/.{1,2}/g);
+            return newB.map((b, i) => {
+                if (b !== oldB[i]) return `<span style="color:red; font-weight:bold;">${b}</span>`;
+                return b;
+            }).join(' ');
+        }
+
+        function testCmd(hex) {
+            socket.send(JSON.stringify({ type: 'write', hex: hex }));
+        }
+
+        function sendHex() {
+            const hex = document.getElementById('hexInput').value;
+            socket.send(JSON.stringify({ type: 'write', hex: hex }));
+        }
+    </script>
+</body>
+
+</html>
