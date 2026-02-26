@@ -7,11 +7,15 @@ This guide explains how to deploy the KX180 Bridge project to a Raspberry Pi run
 - USB connection to the JBL KX-180 Mixer.
 - Network connection for the Web UI.
 
-## 1. Transfer Files
-Copy the `kx180-bridge` folder and the `setup-rpi.sh` script to your Raspberry Pi using SCP or a USB drive.
+## 1. Get the Code
+You can clone the project directly to your Raspberry Pi:
+```bash
+git clone https://github.com/cccgi/jbl-kx180.git
+cd jbl-kx180
+```
 
 ## 2. Run Setup Script
-On the Raspberry Pi terminal, navigate to the folder and run the setup script:
+On the Raspberry Pi terminal, run the setup script:
 ```bash
 chmod +x setup-rpi.sh
 sudo ./setup-rpi.sh
